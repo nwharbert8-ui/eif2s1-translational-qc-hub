@@ -1,7 +1,8 @@
+
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════
-MS2 EIF2S1 DEFINITIVE PIPELINE — Google Colab (12GB RAM)
+MS2 EIF2S1 DEFINITIVE PIPELINE — Google Colab (12GB RAM) — FIXED v2
 ═══════════════════════════════════════════════════════════════════════════════
 
 MANUSCRIPT: "EIF2S1 Co-expression Network Reveals a Closed-Loop
@@ -11,10 +12,11 @@ to Ribosome Rescue Machinery in Human Brain"
 AUTHOR:     Drake H. Harbert (ORCID: 0009-0007-7740-3616)
             Inner Architecture LLC, Canton, OH 44721, USA
 
-PURPOSE:    Single definitive pipeline producing every number in MS2.
-            Fixes gProfiler API issue (uses gprofiler-official package),
-            corrects proteostasis gene set (24 genes exactly),
-            respects 12GB RAM via sequential region processing.
+FIXES IN THIS VERSION:
+  1. BRAIN_REGIONS: Putamen/NAcc labels corrected to match exact GTEx
+     SMTSD strings (lowercase 'basal ganglia')
+  2. Diagnostic print of actual GTEx tissue labels for verification
+  3. Figure 2 loop variable conflict resolved
 
 USAGE:      Copy cells into Google Colab. Run in order.
             Total runtime ~20-30 minutes depending on download speed.
@@ -27,7 +29,7 @@ OUTPUTS:    All CSV results, all 3 manuscript figures, full enrichment data.
 # ║  CELL 1: ENVIRONMENT SETUP                                              ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-# !pip install gprofiler-official matplotlib-venn requests -q
+!pip install gprofiler-official requests matplotlib-venn -q
 
 import os
 import gc
@@ -42,7 +44,7 @@ import matplotlib
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
 import matplotlib.pyplot as plt
-from matplotlib_venn import venn3
+from matplotlib_venn import venn2
 warnings.filterwarnings('ignore')
 
 # ── Output directory ──
@@ -52,7 +54,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 print("=" * 70)
-print("MS2 EIF2S1 DEFINITIVE PIPELINE")
+print("MS2 EIF2S1 DEFINITIVE PIPELINE — FIXED v2")
 print("Drake H. Harbert — Inner Architecture LLC")
 print("=" * 70)
 
@@ -64,11 +66,13 @@ print("=" * 70)
 TARGET_GENES = ['EIF2S1', 'PELO', 'LTN1', 'NEMF', 'TMEM97', 'HSPA5', 'SIGMAR1']
 
 # ── Brain regions ──
+# CRITICAL FIX: GTEx v8 uses lowercase 'basal ganglia' in SMTSD labels.
+# Previous version had uppercase 'Basal Ganglia' which returned 0 samples.
 BRAIN_REGIONS = OrderedDict([
     ('BA9',          'Brain - Frontal Cortex (BA9)'),
-    ('Putamen',      'Brain - Putamen (Basal Ganglia)'),
+    ('Putamen',      'Brain - Putamen (basal ganglia)'),
     ('Hippocampus',  'Brain - Hippocampus'),
-    ('NAcc',         'Brain - Nucleus accumbens (Basal Ganglia)'),
+    ('NAcc',         'Brain - Nucleus accumbens (basal ganglia)'),
     ('BA24',         'Brain - Anterior cingulate cortex (BA24)'),
 ])
 PRIMARY_REGION = 'BA9'
@@ -141,9 +145,6 @@ print(f"Gene sets: RQC={len(RQC_GENES)}, Proteostasis={len(PROTEOSTASIS_GENES)},
 # ║  CELL 3: DOWNLOAD GTEx v8 DATA                                          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-# NOTE: GTEx TPM file is ~2.6GB compressed. This cell downloads it once.
-# If you've already downloaded, skip this cell.
-
 GTEX_TPM_URL = "https://storage.googleapis.com/adult-gtex/bulk-gex/v8/rna-seq/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct.gz"
 GTEX_SAMPLE_URL = "https://storage.googleapis.com/adult-gtex/annotations/v8/metadata-files/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt"
 GTEX_SUBJECT_URL = "https://storage.googleapis.com/adult-gtex/annotations/v8/metadata-files/GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt"
@@ -173,12 +174,34 @@ print("\nAll GTEx files ready.")
 print("Loading sample metadata...")
 sample_attr = pd.read_csv(SAMPLE_FILE, sep='\t', low_memory=False)
 
+# ── DIAGNOSTIC: Print actual GTEx brain tissue labels ──
+# This catches any future label mismatches immediately.
+print("\n  ── Actual GTEx brain tissue labels in SMTSD column ──")
+brain_labels = sample_attr[sample_attr['SMTSD'].str.contains('Brain', na=False)]['SMTSD'].unique()
+for label in sorted(brain_labels):
+    count = (sample_attr['SMTSD'] == label).sum()
+    marker = " ◄ USED" if label in BRAIN_REGIONS.values() else ""
+    print(f"    {repr(label):60s} n={count}{marker}")
+
+# Verify all requested regions were found
+for key, smtsd in BRAIN_REGIONS.items():
+    if smtsd not in brain_labels:
+        print(f"\n  ⚠ FATAL: '{smtsd}' NOT FOUND in GTEx labels!")
+        print(f"    Check spelling/capitalization against the list above.")
+        raise ValueError(f"Region label mismatch for {key}: '{smtsd}'")
+
 # Build region → sample ID mapping
+print()
 region_samples = {}
 for key, smtsd in BRAIN_REGIONS.items():
     mask = sample_attr['SMTSD'] == smtsd
     region_samples[key] = list(sample_attr.loc[mask, 'SAMPID'])
     print(f"  {key}: {len(region_samples[key])} samples")
+
+# Sanity check: all regions must have samples
+for key, samples in region_samples.items():
+    if len(samples) == 0:
+        raise ValueError(f"Region {key} has 0 samples! Label mismatch.")
 
 # Load subject phenotypes (for agonal stress analysis)
 print("\nLoading subject phenotypes...")
@@ -209,9 +232,6 @@ if 'AGE' in ba9_subject_df.columns:
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  CELL 5: LOAD GTEx TPM — MEMORY-EFFICIENT (12GB SAFE)                   ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-
-# Strategy: Read header to get column positions, then load only brain columns.
-# This avoids loading the full 56,000-sample matrix into memory.
 
 print("Loading GTEx TPM (brain regions only, memory-efficient)...")
 
@@ -289,18 +309,9 @@ print(f"  Memory: {tpm_raw.memory_usage(deep=True).sum() / 1e9:.2f} GB")
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def prepare_region(region_key):
-    """Extract and filter expression matrix for one brain region.
-
-    Returns: (log2_expr DataFrame, n_samples, n_genes, gene_list)
-    """
+    """Extract and filter expression matrix for one brain region."""
     samples = [s for s in region_samples[region_key] if s in tpm_raw.columns]
     expr = tpm_raw[samples].copy()
-
-    # Deduplicate gene symbols: keep highest median expression
-    # First, map Ensembl IDs to gene symbols via Description column
-    # GTEx uses Ensembl IDs as index — we need gene symbols
-    # Actually, GTEx GCT file Name column is ENSG IDs, Description is gene symbols
-    # Let's use Description as gene symbol
 
     # Add gene symbol from descriptions
     expr['gene_symbol'] = gene_descriptions.reindex(expr.index)
@@ -362,7 +373,7 @@ n_samples_ba9 = region_data[PRIMARY_REGION]['n_samples']
 print(f"Matrix: {n_genes_ba9} genes × {n_samples_ba9} samples")
 
 # Compute correlations for each target gene
-correlations = {}  # target → Series of correlations indexed by gene
+correlations = {}
 for target in TARGET_GENES:
     if target not in ba9.index:
         print(f"  ⚠ {target} not found in {PRIMARY_REGION}")
@@ -370,7 +381,7 @@ for target in TARGET_GENES:
 
     target_expr = ba9.loc[target].values
     other_genes = [g for g in ba9.index if g != target]
-    other_expr = ba9.loc[other_genes].values  # (n_genes-1, n_samples)
+    other_expr = ba9.loc[other_genes].values
 
     # Vectorized Pearson correlation
     n = len(target_expr)
@@ -379,7 +390,6 @@ for target in TARGET_GENES:
     x_std = np.sqrt(np.sum(x**2))
     Y_std = np.sqrt(np.sum(Y**2, axis=1))
 
-    # Avoid division by zero
     valid = Y_std > 0
     r_values = np.full(len(other_genes), np.nan)
     r_values[valid] = np.dot(Y[valid], x) / (Y_std[valid] * x_std)
@@ -399,9 +409,8 @@ print(f"\n{'='*70}")
 print("TOP 5% NETWORK EXTRACTION + PAIRWISE COMPARISONS")
 print(f"{'='*70}\n")
 
-# Extract top 5% for each target
-networks = {}     # target → set of top 5% genes
-thresholds = {}   # target → minimum r for top 5%
+networks = {}
+thresholds = {}
 
 for target, corr in correlations.items():
     n_total = len(corr)
@@ -414,7 +423,6 @@ for target, corr in correlations.items():
 
     print(f"  {target}: top 5% = {n_top} genes, r ≥ {threshold:.3f}")
 
-# Gene universe size (non-target genes)
 gene_universe = len(correlations[TARGET_GENES[0]])
 print(f"\n  Gene universe (non-target): {gene_universe}")
 
@@ -436,7 +444,6 @@ for g1, g2 in combinations(TARGET_GENES, 2):
     jaccard = len(shared) / len(union) if len(union) > 0 else 0
 
     # Fisher's exact test
-    n_top = len(set1)  # both should be same size
     a = len(shared)
     b = len(only1)
     c = len(only2)
@@ -485,15 +492,7 @@ print(f"{'='*70}\n")
 
 def compute_custom_enrichment(network_genes, gene_set_list, set_name,
                                all_genes_list, verbose=True):
-    """Fisher's exact test for custom gene set enrichment.
-
-    Parameters
-    ----------
-    network_genes : set — top 5% gene set
-    gene_set_list : list — curated gene set
-    set_name : str — name for display
-    all_genes_list : list — all expressed genes (universe)
-    """
+    """Fisher's exact test for custom gene set enrichment."""
     universe = set(all_genes_list)
     expressed = [g for g in gene_set_list if g in universe]
     in_network = [g for g in expressed if g in network_genes]
@@ -506,11 +505,9 @@ def compute_custom_enrichment(network_genes, gene_set_list, set_name,
     if n_expressed == 0:
         return None
 
-    # Expected count
     expected = n_expressed * n_network / n_universe
     fold = n_in_network / expected if expected > 0 else 0
 
-    # Fisher's exact test (one-sided)
     a = n_in_network
     b = n_network - n_in_network
     c = n_expressed - n_in_network
@@ -557,14 +554,13 @@ custom_df = pd.DataFrame(custom_results)
 custom_df.to_csv(os.path.join(RESULTS_DIR, "EIF2S1_custom_enrichment.csv"), index=False)
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  CELL 10: gProfiler ENRICHMENT (FIXED — uses gprofiler-official)         ║
+# ║  CELL 10: gProfiler ENRICHMENT (uses gprofiler-official)                 ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 print(f"\n{'='*70}")
 print("gProfiler GO/KEGG/REACTOME ENRICHMENT")
 print(f"{'='*70}\n")
 
-# Install if needed: !pip install gprofiler-official -q
 try:
     from gprofiler import GProfiler
     gp = GProfiler(return_dataframe=True)
@@ -576,11 +572,7 @@ except ImportError:
     GPROFILER_AVAILABLE = False
 
 def run_gprofiler_enrichment(gene_list, background_list, label=""):
-    """Run gProfiler enrichment with proper background.
-
-    Uses gprofiler-official package (handles large backgrounds correctly).
-    Falls back to requests API if package unavailable.
-    """
+    """Run gProfiler enrichment with proper background."""
     genes = list(gene_list)
     bg = list(background_list)
 
@@ -647,19 +639,10 @@ background = eif2s1_genes  # all expressed genes + EIF2S1
 
 print("Running enrichment analyses:\n")
 
-# 1. EIF2S1 full network
 go_eif2s1 = run_gprofiler_enrichment(eif2s1_top5_genes, background, "EIF2S1 full")
-
-# 2. PELO full network
 go_pelo = run_gprofiler_enrichment(pelo_top5_genes, background, "PELO full")
-
-# 3. Shared EIF2S1 ∩ PELO
 go_shared = run_gprofiler_enrichment(shared_ep, background, "EIF2S1∩PELO shared")
-
-# 4. EIF2S1-unique
 go_eif2s1_uniq = run_gprofiler_enrichment(eif2s1_unique, background, "EIF2S1 unique")
-
-# 5. PELO-unique
 go_pelo_uniq = run_gprofiler_enrichment(pelo_unique, background, "PELO unique")
 
 # Save all results
@@ -669,7 +652,7 @@ for name, df in [('EIF2S1_full', go_eif2s1), ('PELO_full', go_pelo),
     if len(df) > 0:
         df.to_csv(os.path.join(RESULTS_DIR, f"gProfiler_{name}.csv"), index=False)
 
-# Print top GO:BP terms for EIF2S1
+# Print top terms
 if len(go_eif2s1) > 0:
     go_bp = go_eif2s1[go_eif2s1['source'] == 'GO:BP'].sort_values('p_value')
     go_kegg = go_eif2s1[go_eif2s1['source'] == 'KEGG'].sort_values('p_value')
@@ -813,11 +796,7 @@ print(f"  Sex: {ba9_covar['SEX_NUM'].notna().sum()} valid")
 
 def partial_correlation_network(target, expr_df, covariates_df, covar_cols,
                                  top_pct=5):
-    """Compute genome-wide correlations after regressing out covariates.
-
-    Returns: (corr_series, threshold, top5_set, n_valid_samples)
-    """
-    # Get valid samples (non-NaN in all covariates)
+    """Compute genome-wide correlations after regressing out covariates."""
     valid = covariates_df[covar_cols].dropna().index
     valid = [s for s in valid if s in expr_df.columns]
     n_valid = len(valid)
@@ -828,9 +807,8 @@ def partial_correlation_network(target, expr_df, covariates_df, covar_cols,
     expr_sub = expr_df[valid]
     covar_matrix = covariates_df.loc[valid, covar_cols].values
 
-    # Residualize: regress covariates from each gene
     from numpy.linalg import lstsq
-    X = np.column_stack([np.ones(n_valid), covar_matrix])  # intercept + covars
+    X = np.column_stack([np.ones(n_valid), covar_matrix])
 
     # Residualize target
     target_vals = expr_sub.loc[target].values
@@ -839,11 +817,10 @@ def partial_correlation_network(target, expr_df, covariates_df, covar_cols,
 
     # Residualize all other genes
     other_genes = [g for g in expr_sub.index if g != target]
-    other_vals = expr_sub.loc[other_genes].values  # (n_genes, n_samples)
+    other_vals = expr_sub.loc[other_genes].values
 
-    # Vectorized residualization
-    betas = lstsq(X, other_vals.T, rcond=None)[0]  # (n_covars+1, n_genes)
-    resid = other_vals - (X @ betas).T  # (n_genes, n_samples)
+    betas = lstsq(X, other_vals.T, rcond=None)[0]
+    resid = other_vals - (X @ betas).T
 
     # Correlate residuals
     x = target_resid - target_resid.mean()
@@ -877,7 +854,6 @@ pelo_rankings = {}
 
 for model_name, covar_cols in models.items():
     if not covar_cols:
-        # Raw = already computed
         eif_corr = correlations['EIF2S1']
         pelo_corr = correlations['PELO']
         eif_set = networks['EIF2S1']
@@ -898,12 +874,10 @@ for model_name, covar_cols in models.items():
     eif2s1_rankings[model_name] = eif_corr
     pelo_rankings[model_name] = pelo_corr
 
-    # EIF2S1-PELO overlap
     shared = eif_set & pelo_set
     union = eif_set | pelo_set
     jaccard = len(shared) / len(union) if len(union) > 0 else 0
 
-    # Rank preservation vs raw
     if model_name != 'Raw' and 'Raw' in eif2s1_rankings:
         common = sorted(set(eif_corr.index) & set(eif2s1_rankings['Raw'].index))
         rho_preserve, _ = spearmanr(
@@ -912,7 +886,6 @@ for model_name, covar_cols in models.items():
     else:
         rho_preserve = 1.0
 
-    # Genome-wide rank correlation between EIF2S1 and PELO
     common_ep = sorted(set(eif_corr.index) & set(pelo_corr.index))
     rho_ep, _ = spearmanr(
         eif_corr.reindex(common_ep).rank(ascending=False),
@@ -951,7 +924,12 @@ print(f"{'='*70}\n")
 region_correlations = {}
 for region_key in BRAIN_REGIONS:
     expr = region_data[region_key]['expr']
+    n_samp = region_data[region_key]['n_samples']
     region_correlations[region_key] = {}
+
+    if n_samp == 0:
+        print(f"  ⚠ {region_key}: SKIPPED (0 samples)")
+        continue
 
     for target in ['EIF2S1', 'PELO']:
         if target not in expr.index:
@@ -974,11 +952,11 @@ for region_key in BRAIN_REGIONS:
         corr_series = pd.Series(r_vals, index=other_genes).dropna().sort_values(ascending=False)
         region_correlations[region_key][target] = corr_series
 
-    print(f"  {region_key}: EIF2S1 ({len(region_correlations[region_key].get('EIF2S1', []))} genes), "
+    print(f"  {region_key} (n={n_samp}): EIF2S1 ({len(region_correlations[region_key].get('EIF2S1', []))} genes), "
           f"PELO ({len(region_correlations[region_key].get('PELO', []))} genes)")
 
-# Cross-region Spearman rank correlations for EIF2S1
-print("\nEIF2S1 cross-region rank correlations:")
+# Cross-region Spearman rank correlations
+print("\nCross-region rank correlations:")
 region_keys = list(BRAIN_REGIONS.keys())
 cross_region_matrix = {}
 
@@ -989,7 +967,7 @@ for target in ['EIF2S1', 'PELO']:
             if i == j:
                 cross_region_matrix[target][i, j] = 1.0
                 continue
-            if target in region_correlations[r1] and target in region_correlations[r2]:
+            if target in region_correlations.get(r1, {}) and target in region_correlations.get(r2, {}):
                 corr1 = region_correlations[r1][target]
                 corr2 = region_correlations[r2][target]
                 common = sorted(set(corr1.index) & set(corr2.index))
@@ -1011,7 +989,8 @@ for target in ['EIF2S1', 'PELO']:
 # Multi-region RQC enrichment
 print("\nRQC enrichment across regions:")
 for region_key in BRAIN_REGIONS:
-    if 'EIF2S1' not in region_correlations[region_key]:
+    if 'EIF2S1' not in region_correlations.get(region_key, {}):
+        print(f"  {region_key}: SKIPPED (no data)")
         continue
     corr = region_correlations[region_key]['EIF2S1']
     n_top = int(np.ceil(len(corr) * TOP_PERCENT / 100))
@@ -1027,9 +1006,11 @@ for region_key in BRAIN_REGIONS:
 # EIF2S1-PELO Jaccard across regions
 print("\nEIF2S1–PELO Jaccard across regions:")
 for region_key in BRAIN_REGIONS:
-    if 'EIF2S1' not in region_correlations[region_key]:
+    if 'EIF2S1' not in region_correlations.get(region_key, {}):
+        print(f"  {region_key}: SKIPPED")
         continue
-    if 'PELO' not in region_correlations[region_key]:
+    if 'PELO' not in region_correlations.get(region_key, {}):
+        print(f"  {region_key}: SKIPPED")
         continue
 
     eif_corr = region_correlations[region_key]['EIF2S1']
@@ -1107,10 +1088,9 @@ print(f"\n{'='*70}")
 print("GENERATING FIGURES")
 print(f"{'='*70}\n")
 
-# ── Figure 1: Three panels ──
 fig = plt.figure(figsize=(18, 6))
 
-# Panel A: Venn diagram (EIF2S1 vs PELO)
+# Panel A: Venn diagram
 ax_a = fig.add_axes([0.02, 0.12, 0.30, 0.80])
 ax_a.text(-0.05, 1.08, 'A', fontsize=20, fontweight='bold', va='top',
           transform=ax_a.transAxes)
@@ -1118,15 +1098,6 @@ ax_a.text(-0.05, 1.08, 'A', fontsize=20, fontweight='bold', va='top',
 n_eif_only = len(eif_unique_genes)
 n_pelo_only = len(pelo_unique_genes)
 n_shared = len(shared_genes)
-
-v = venn3(subsets=(n_eif_only, n_pelo_only, n_shared, 0, 0, 0, 0),
-          set_labels=('', '', ''))
-
-# We need a 2-circle venn, but venn3 works with 3. Use venn2 instead.
-from matplotlib_venn import venn2
-ax_a.clear()
-ax_a.text(-0.05, 1.08, 'A', fontsize=20, fontweight='bold', va='top',
-          transform=ax_a.transAxes)
 
 v = venn2(subsets=(n_eif_only, n_pelo_only, n_shared),
           set_labels=('EIF2S1', 'PELO'), ax=ax_a)
@@ -1141,7 +1112,7 @@ ax_a.set_title(f'EIF2S1–PELO Network Overlap\n'
                f'J = {n_shared/(n_eif_only+n_pelo_only+n_shared):.3f}',
                fontsize=12, fontweight='bold')
 
-# Panel B: Scatter plot of genome-wide rankings
+# Panel B: Scatter plot
 ax_b = fig.add_axes([0.37, 0.12, 0.28, 0.80])
 ax_b.text(-0.15, 1.08, 'B', fontsize=20, fontweight='bold', va='top',
           transform=ax_b.transAxes)
@@ -1151,7 +1122,6 @@ common_genes_plot = sorted(set(correlations['EIF2S1'].index) &
 ranks_eif = correlations['EIF2S1'].reindex(common_genes_plot).rank(ascending=False)
 ranks_pelo = correlations['PELO'].reindex(common_genes_plot).rank(ascending=False)
 
-# Subsample for visibility
 np.random.seed(42)
 idx = np.random.choice(len(common_genes_plot),
                        min(5000, len(common_genes_plot)), replace=False)
@@ -1235,34 +1205,37 @@ eif_reac = extract_top_terms(go_eif2s1, 'REAC', 5)
 fig, axes = plt.subplots(2, 2, figsize=(18, 10))
 plt.subplots_adjust(wspace=0.55, hspace=0.45)
 
+# FIX: Previous version had a confusing double-axis variable from zip.
+# Now we iterate directly over panels with proper axis assignment.
 panels = [
-    (axes[0, 0], f'A  EIF2S1 full ({len(eif2s1_top5_genes)} genes) — GO:BP',
+    (0, 0, f'A  EIF2S1 full ({len(eif2s1_top5_genes)} genes) — GO:BP',
      eif_bp, '#1565C0'),
-    (axes[0, 1], f'B  EIF2S1∩PELO shared ({len(shared_genes)} genes) — GO:BP',
+    (0, 1, f'B  EIF2S1∩PELO shared ({len(shared_genes)} genes) — GO:BP',
      shared_bp, '#7B1FA2'),
-    (axes[1, 0], f'C  EIF2S1 unique ({len(eif_unique_genes)} genes) — GO:BP',
+    (1, 0, f'C  EIF2S1 unique ({len(eif_unique_genes)} genes) — GO:BP',
      eif_uniq_bp, '#0D47A1'),
-    (axes[1, 1], f'D  PELO unique ({len(pelo_unique_genes)} genes) — GO:BP',
+    (1, 1, f'D  PELO unique ({len(pelo_unique_genes)} genes) — GO:BP',
      pelo_uniq_bp, '#C62828'),
 ]
 
-for ax_ref, title, terms, color in panels:
+for row_idx, col_idx, title, terms, color in panels:
+    ax = axes[row_idx, col_idx]
     if not terms:
-        ax_ref.text(0.5, 0.5, 'No significant\nGO:BP terms',
-                    ha='center', va='center', fontsize=12,
-                    transform=ax_ref.transAxes)
-        ax_ref.set_title(title, fontsize=11, fontweight='bold')
+        ax.text(0.5, 0.5, 'No significant\nGO:BP terms',
+                ha='center', va='center', fontsize=12,
+                transform=ax.transAxes)
+        ax.set_title(title, fontsize=11, fontweight='bold')
         continue
 
     names = [t['name'] for t in reversed(terms)]
     values = [t['nlp'] for t in reversed(terms)]
-    ax_ref.barh(range(len(names)), values, color=color, alpha=0.85, edgecolor='white')
-    ax_ref.set_yticks(range(len(names)))
-    ax_ref.set_yticklabels(names, fontsize=9)
-    ax_ref.set_xlabel('$-\\log_{10}(p)$', fontsize=10)
-    ax_ref.set_title(title, fontsize=11, fontweight='bold')
-    ax_ref.spines['top'].set_visible(False)
-    ax_ref.spines['right'].set_visible(False)
+    ax.barh(range(len(names)), values, color=color, alpha=0.85, edgecolor='white')
+    ax.set_yticks(range(len(names)))
+    ax.set_yticklabels(names, fontsize=9)
+    ax.set_xlabel('$-\\log_{10}(p)$', fontsize=10)
+    ax.set_title(title, fontsize=11, fontweight='bold')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
 
 fig.savefig(os.path.join(FIGURES_DIR, 'Figure2_GO_Enrichment.png'),
             dpi=300, bbox_inches='tight', facecolor='white')
@@ -1364,6 +1337,10 @@ for _, row in agonal_df.iterrows():
 print(f"\n─── Cross-Region Replication (EIF2S1) ───")
 eif_vals = cross_region_matrix['EIF2S1'][np.triu_indices(5, k=1)]
 print(f"  Range: ρ = {eif_vals.min():.3f} – {eif_vals.max():.3f}")
+
+print(f"\n─── Cross-Region Replication (PELO) ───")
+pelo_vals = cross_region_matrix['PELO'][np.triu_indices(5, k=1)]
+print(f"  Range: ρ = {pelo_vals.min():.3f} – {pelo_vals.max():.3f}")
 
 print(f"\n─── LTN1–NEMF (for context) ───")
 ln_row = comp_df[(comp_df['gene1'] == 'LTN1') & (comp_df['gene2'] == 'NEMF')]
